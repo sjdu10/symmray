@@ -94,7 +94,10 @@ class BlockIndex:
         return new
 
     def copy_with(self, chargemap=None, dual=None, subinfo=None):
-        """A copy of this index with some attributes replaced."""
+        """A copy of this index with some attributes replaced. Note that checks
+        are not performed on the new propoerties, this is intended for internal
+        use.
+        """
         new = self.__new__(self.__class__)
         new._chargemap = (
             self._chargemap.copy()
@@ -111,11 +114,9 @@ class BlockIndex:
 
     def conj(self):
         """A copy of this index with the dualness reversed."""
-        new = self.__new__(self.__class__)
-        new._chargemap = self._chargemap.copy()
-        new._dual = not self._dual
-        new._subinfo = None if self._subinfo is None else self._subinfo.conj()
-        return new
+        dual = not self.dual
+        subinfo = None if self.subinfo is None else self.subinfo.conj()
+        return self.copy_with(dual=dual, subinfo=subinfo)
 
     def size_of(self, c):
         """The size of the block with charge ``c``."""
@@ -690,7 +691,6 @@ def calc_fuse_block_info(self, axes_groups):
 
 _fuseinfos = {}
 
-
 def cached_fuse_block_info(self, axes_groups):
     """Calculating fusing block information is expensive, so cache the results."""
     key = hash(
@@ -703,6 +703,7 @@ def cached_fuse_block_info(self, axes_groups):
             axes_groups,
         )
     )
+
     try:
         res = _fuseinfos[key]
     except KeyError:
@@ -1461,7 +1462,21 @@ class AbelianArray(BlockBase):
 
         new_blocks = {}
         for sector, array in self.blocks.items():
-            new_shape, new_sector, subsectors = blockmap[sector]
+            try:
+                new_shape, new_sector, subsectors = blockmap[sector]
+            except KeyError:
+                # might get KeyError due to Hash collision in using cached_fuse_block_info
+                (
+                    num_groups,
+                    perm,
+                    position,
+                    axes_before,
+                    axes_after,
+                    new_axes,
+                    new_indices,
+                    blockmap,
+                ) = calc_fuse_block_info(self, axes_groups)
+                new_shape, new_sector, subsectors = blockmap[sector]
             # fuse (via transpose+reshape) the actual array, to concat later
             new_array = _transpose(array, perm)
             new_array = _reshape(new_array, new_shape)
@@ -1929,7 +1944,6 @@ def _tensordot_blockwise(a, b, left_axes, axes_a, axes_b, right_axes):
     #         new_blocks[sector] = _tensordot(
     #             arrays_suba, arrays_subb, axes=stacked_axes
     #         )
-
     for sector, (arrays_suba, arrays_subb) in new_blocks.items():
         new_blocks[sector] = functools.reduce(
             operator.add,
@@ -1939,12 +1953,11 @@ def _tensordot_blockwise(a, b, left_axes, axes_a, axes_b, right_axes):
             ),
         )
 
-    new = a.__new__(a.__class__)
-    new._symmetry = a.symmetry
-    new._indices = without(a.indices, axes_a) + without(b.indices, axes_b)
-    new._charge = new.symmetry.combine(a.charge, b.charge)
-    new._blocks = new_blocks
-    return new
+    return a.copy_with(
+        indices=without(a.indices, axes_a) + without(b.indices, axes_b),
+        charge=a.symmetry.combine(a.charge, b.charge),
+        blocks=new_blocks,
+    )
 
 
 def drop_misaligned_sectors(a, b, axes_a, axes_b):
@@ -1988,6 +2001,21 @@ def drop_misaligned_sectors(a, b, axes_a, axes_b):
 
     return a.copy_with(blocks=new_blocks_a), b.copy_with(blocks=new_blocks_b)
 
+def drop_zero_blocks(a):
+    """Drop any blocks that are zero from the given AbelianArray.
+
+    Parameters
+    ----------
+    a : AbelianArray
+        The array to drop zero blocks from.
+
+    Returns
+    -------
+    AbelianArray
+    """
+    new_blocks = {sector: array for sector, array in a.blocks.items() if array.any()}
+    return a.copy_with(blocks=new_blocks)
+
 
 def _tensordot_via_fused(a, b, left_axes, axes_a, axes_b, right_axes):
     """Perform a tensordot between two block arrays, by first fusing both into
@@ -2004,11 +2032,14 @@ def _tensordot_via_fused(a, b, left_axes, axes_a, axes_b, right_axes):
     right_axes : tuple[int]
         The axes of ``b`` that will not be contracted.
     """
+    a = drop_zero_blocks(a)
+    b = drop_zero_blocks(b)
     a, b = drop_misaligned_sectors(a, b, axes_a, axes_b)
 
     if not a.blocks or not b.blocks:
         # no aligned sectors, return empty array
-        return a.copy_with(
+        ts = a if a.parity else b
+        return ts.copy_with(
             indices=without(a.indices, axes_a) + without(b.indices, axes_b),
             charge=a.symmetry.combine(a.charge, b.charge),
             blocks={},
