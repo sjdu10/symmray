@@ -18,8 +18,13 @@ from .symmetries import get_symmetry
 from .utils import DEBUG
 
 
+def hasher(k):
+    return hashlib.sha1(pickle.dumps(k)).hexdigest()
+
+
 class BlockIndex:
-    """An index of a block sparse, abelian symmetric tensor.
+    """An index of a block sparse, abelian symmetric tensor. This is intended
+    to be used immutably.
 
     Parameters
     ----------
@@ -35,7 +40,7 @@ class BlockIndex:
         this index was formed from fusing.
     """
 
-    __slots__ = ("_chargemap", "_dual", "_subinfo")
+    __slots__ = ("_chargemap", "_dual", "_subinfo", "_hashkey")
 
     def __init__(self, chargemap, dual=False, subinfo=None):
         # ensure always sorted
@@ -45,6 +50,7 @@ class BlockIndex:
             self._chargemap = dict(sorted(chargemap.items()))
         self._dual = bool(dual)
         self._subinfo = subinfo
+        self._hashkey = None
 
     @property
     def chargemap(self):
@@ -88,14 +94,6 @@ class BlockIndex:
         """The number of charges."""
         return len(self._chargemap)
 
-    def copy(self):
-        """A copy of this index."""
-        new = self.__new__(self.__class__)
-        new._chargemap = self._chargemap.copy()
-        new._dual = self._dual
-        new._subinfo = self._subinfo
-        return new
-
     def copy_with(self, chargemap=None, dual=None, subinfo=None):
         """A copy of this index with some attributes replaced. Note that checks
         are not performed on the new propoerties, this is intended for internal
@@ -113,6 +111,7 @@ class BlockIndex:
         )
         new._dual = self._dual if dual is None else dual
         new._subinfo = self._subinfo if subinfo is None else subinfo
+        new._hashkey = None
         return new
 
     def conj(self):
@@ -136,7 +135,7 @@ class BlockIndex:
         """
         return self.copy_with(
             chargemap={
-                c: d for c, d in self.chargemap.items() if c not in charges
+                c: d for c, d in self._chargemap.items() if c not in charges
             },
             subinfo=(
                 None
@@ -179,7 +178,7 @@ class BlockIndex:
             The other index to compare to.
         """
         return (
-            dicts_dont_conflict(self.chargemap, other.chargemap)
+            dicts_dont_conflict(self._chargemap, other._chargemap)
             and (self.dual ^ other.dual)
             and (
                 (self.subinfo is other.subinfo is None)
@@ -187,21 +186,29 @@ class BlockIndex:
             )
         )
 
-    def __hash__(self):
-        return hash(
-            (
-                tuple(self._chargemap.items()),
-                self._dual,
-                self._subinfo,
+    def hashkey(self):
+        """Get a hash key for this index."""
+        if getattr(self, "_hashkey", None) is None:
+            self._hashkey = hasher(
+                (
+                    tuple(self._chargemap.items()),
+                    self._dual,
+                    self._subinfo.hashkey() if self._subinfo else None,
+                )
             )
-        )
+        return self._hashkey
+
+    def __hash__(self):
+        # disable as hash(-1) == hash(-2) causes problems
+        # XXX: use hashkey?
+        raise NotImplementedError
 
     def __str__(self):
         lines = [
             f"({self.size_total} = "
-            f"{'+'.join(map(str, self.chargemap.values()))} "
+            f"{'+'.join(map(str, self._chargemap.values()))} "
             f": {'-' if self.dual else '+'}"
-            f"[{','.join(map(str, self.chargemap.keys()))}])"
+            f"[{','.join(map(str, self._chargemap.keys()))}])"
         ]
 
         if self.subinfo:
@@ -220,7 +227,7 @@ class BlockIndex:
         return "".join(
             [
                 f"{self.__class__.__name__}(",
-                f"chargemap={self.chargemap}, dual={self.dual}",
+                f"chargemap={self._chargemap}, dual={self.dual}",
                 (
                     f", subinfo={self.subinfo}"
                     if self.subinfo is not None
@@ -254,27 +261,41 @@ class SubIndexInfo:
         This should not be mutated after creation.
     """
 
-    __slots__ = ("extents", "indices")
+    __slots__ = ("_extents", "_indices", "_hashkey")
 
     def __init__(self, indices, extents):
-        self.indices = indices
-        self.extents = extents
+        self._indices = indices
+        self._extents = extents
+        self._hashkey = None
+
+    @property
+    def indices(self):
+        """The indices that were fused to make this index."""
+        return self._indices
+
+    @property
+    def extents(self):
+        """A mapping of each charge of the fused index to a mapping of each
+        subsector (combination of sub charges) to the size of that subsector.
+        """
+        return self._extents
 
     def copy_with(self, indices=None, extents=None):
         """A copy of this subindex information with some attributes replaced.
-        Note that checks are not performed on the new propoerties, this is
+        Note that checks are not performed on the new properties, this is
         intended for internal use.
         """
         new = self.__new__(self.__class__)
-        new.indices = self.indices if indices is None else indices
-        new.extents = self.extents if extents is None else extents
+        new._indices = self._indices if indices is None else indices
+        new._extents = self._extents if extents is None else extents
+        new._hashkey = None
         return new
 
     def conj(self):
         """A copy of this subindex information with the relevant dualnesses
         reversed.
         """
-        self.copy_with(indices=tuple(ix.conj() for ix in self.indices))
+        self.copy_with(indices=tuple(ix.conj() for ix in self._indices))
 
     def drop_charges(self, charges):
         """Get a copy of this subindex information with the charges in
@@ -283,7 +304,7 @@ class SubIndexInfo:
         return self.copy_with(
             extents={
                 c: extent
-                for c, extent in self.extents.items()
+                for c, extent in self._extents.items()
                 if c not in charges
             },
         )
@@ -294,18 +315,36 @@ class SubIndexInfo:
         For debugging.
         """
         return all(
-            i.matches(j) for i, j in zip(self.indices, other.indices)
-        ) and dicts_dont_conflict(self.extents, other.extents)
+            i.matches(j) for i, j in zip(self._indices, other._indices)
+        ) and dicts_dont_conflict(self._extents, other._extents)
+
+    def hashkey(self):
+        """Get a string hash key for this subindex information. This is cached
+        after the first call.
+        """
+        if getattr(self, "_hashkey", None) is None:
+            self._hashkey = hasher(
+                (
+                    tuple(ix.hashkey for ix in self._indices),
+                    tuple(
+                        (c, tuple(extent.items()))
+                        for c, extent in self._extents.items()
+                    ),
+                )
+            )
+        return self._hashkey
 
     def __hash__(self):
+        # disable as hash(-1) == hash(-2) causes problems
+        # XXX: use hashkey?
         raise NotImplementedError
 
     def __repr__(self):
         return "".join(
             [
                 f"{self.__class__.__name__}(",
-                f"indices={self.indices}, ",
-                f"extents={self.extents}",
+                f"indices={self._indices}, ",
+                f"extents={self._extents}",
                 ")",
             ]
         )
@@ -551,6 +590,9 @@ def calc_reshape_args(shape, newshape, subsizes):
 
 @functools.lru_cache(2**14)
 def calc_fuse_group_info(axes_groups, duals):
+    """Calculate the fusing information just to do with axes groups
+    (not any specific blocks).
+    """
     ndim = len(duals)
 
     # which group does each axis appear in, if any
@@ -608,6 +650,7 @@ def calc_fuse_group_info(axes_groups, duals):
 
 
 def calc_fuse_block_info(self, axes_groups):
+    """Calculate the fusing information for a specific set of sectors/blocks."""
     # basic info that doesn't depend on sectors themselves
     (
         num_groups,
@@ -759,25 +802,36 @@ def calc_fuse_block_info(self, axes_groups):
 
 
 _fuseinfos = OrderedDict()
-_fuseinfo_cache_maxsize = 2**12
+_fuseinfo_cache_maxsize = 2**14
 _fuseinfo_cache_maxsectors = 2**10
 
+_fi_missed = 0
+_fi_hit = 0
+_fi_missed_too_long = 0
 
-def hasher(k):
-    return hashlib.sha1(pickle.dumps(k)).hexdigest()
+
+def print_fuseinfo_cache_stats():
+    print(
+        f"Cache size: {len(_fuseinfos)}\n"
+        f"missed: {_fi_missed}, hit: {_fi_hit}\n"
+        f"missed too long: {_fi_missed_too_long}\n"
+        f"ratio: {_fi_missed / (_fi_missed + _fi_hit):.2f}\n"
+    )
 
 def cached_fuse_block_info(self, axes_groups):
-    """Calculating fusing block information is expensive, so cache the results."""
+    """Calculating fusing block information is expensive, so cache the results.
+    This is a LRU cache that also skips caching if there are too many sectors.
+    """
 
     if len(self.blocks) > _fuseinfo_cache_maxsectors:
         # too many sectors to cache
+        global _fi_missed_too_long
+        _fi_missed_too_long += 1
         return calc_fuse_block_info(self, axes_groups)
 
     key = hasher(
         (
-            tuple(
-                (tuple(ix.chargemap.items()), ix.dual) for ix in self.indices
-            ),
+            tuple(ix.hashkey() for ix in self.indices),
             tuple(self.blocks),
             self.symmetry,
             axes_groups,
@@ -788,6 +842,8 @@ def cached_fuse_block_info(self, axes_groups):
         res = _fuseinfos[key]
         # mark as most recently used
         _fuseinfos.move_to_end(key)
+        global _fi_hit
+        _fi_hit += 1
     except KeyError:
         # compute new info
         res = _fuseinfos[key] = calc_fuse_block_info(self, axes_groups)
@@ -795,6 +851,8 @@ def cached_fuse_block_info(self, axes_groups):
         if len(_fuseinfos) > _fuseinfo_cache_maxsize:
             # cache is full, remove the oldest entry
             _fuseinfos.popitem(last=False)
+        global _fi_missed
+        _fi_missed += 1
 
     return res
 
@@ -837,6 +895,8 @@ class AbelianArray(BlockBase):
     ):
         self._indices = tuple(indices)
         self._blocks = dict(blocks)
+        
+        self._symmetry = self.get_class_symmetry(symmetry)
 
         if charge is None:
             if self._blocks:
@@ -848,8 +908,6 @@ class AbelianArray(BlockBase):
                 self._charge = self.symmetry.combine()
         else:
             self._charge = charge
-
-        self._symmetry = self.get_class_symmetry(symmetry)
 
         if DEBUG:
             self.check()
@@ -870,6 +928,10 @@ class AbelianArray(BlockBase):
         return new
 
     def copy_with(self, indices=None, charge=None, blocks=None):
+        """A copy of this block array with some attributes replaced. Note that
+        checks are not performed on the new properties, this is intended for
+        internal use.
+        """
         new = self.__new__(self.__class__)
         new._indices = self._indices if indices is None else indices
         new._charge = self._charge if charge is None else charge
@@ -880,6 +942,23 @@ class AbelianArray(BlockBase):
             new.check()
 
         return new
+
+    def modify(self, indices=None, charge=None, blocks=None):
+        """Modify this block array in place with some attributes replaced. Note
+        that checks are not performed on the new properties, this is intended
+        for internal use.
+        """
+        if indices is not None:
+            self._indices = indices
+        if charge is not None:
+            self._charge = charge
+        if blocks is not None:
+            self._blocks = blocks
+
+        if DEBUG:
+            self.check()
+
+        return self
 
     @property
     def symmetry(self):
@@ -941,7 +1020,7 @@ class AbelianArray(BlockBase):
         )
 
         if inplace:
-            self._indices = new_indices
+            return self.modify(indices=new_indices)
         else:
             return self.copy_with(indices=new_indices)
 
@@ -1425,8 +1504,11 @@ class AbelianArray(BlockBase):
         new = self if inplace else self.copy()
         _conj = ar.get_lib_fn(new.backend, "conj")
         new.apply_to_arrays(_conj)
-        new._indices = tuple(ix.conj() for ix in self._indices)
-        new._charge = self.symmetry.sign(self._charge)
+
+        new.modify(
+            indices=tuple(ix.conj() for ix in self._indices),
+            charge=self.symmetry.sign(self._charge),
+        )
 
         if DEBUG:
             new.check()
@@ -1443,12 +1525,13 @@ class AbelianArray(BlockBase):
             # reverse the axes
             axes = tuple(range(new.ndim - 1, -1, -1))
 
-        new._indices = permuted(new._indices, axes)
-        new._blocks = {
-            permuted(sector, axes): _transpose(array, axes)
-            for sector, array in new.blocks.items()
-        }
-        return new
+        return new.modify(
+            indices=permuted(new._indices, axes),
+            blocks = {
+                permuted(sector, axes): _transpose(array, axes)
+                for sector, array in new.blocks.items()
+            }
+        )
 
     @property
     def T(self):
@@ -1512,9 +1595,7 @@ class AbelianArray(BlockBase):
             fn_sector=lambda sector: tuple(sector[ax] for ax in keep),
             fn_block=lambda block: block[selector],
         )
-        x._indices = tuple(new_indices)
-
-        return x
+        return x.modify(indices=tuple(new_indices))
 
     def expand_dims(self, axis, c=None, dual=None, inplace=False):
         """Expand the shape of an abelian array.
@@ -1577,9 +1658,7 @@ class AbelianArray(BlockBase):
             *x.indices[axis:],
         )
 
-        x._indices = new_indices
-        x._charge = new_charge
-        return x
+        return x.modify(indices=new_indices, charge=new_charge)
 
     def _fuse_core(self, *axes_groups, inplace=False):
         (
@@ -1689,9 +1768,7 @@ class AbelianArray(BlockBase):
         }
 
         if inplace:
-            self._indices = new_indices
-            self._blocks = new_blocks
-            return self
+            return self.modify(indices=new_indices, blocks=new_blocks)
         else:
             return self.copy_with(indices=new_indices, blocks=new_blocks)
 
@@ -1806,9 +1883,7 @@ class AbelianArray(BlockBase):
         new_blocks = new_blocks
 
         if inplace:
-            self._indices = new_indices
-            self._blocks = new_blocks
-            return self
+            return self.modify(indices=new_indices, blocks=new_blocks)
         else:
             return self.copy_with(indices=new_indices, blocks=new_blocks)
 
@@ -2198,10 +2273,8 @@ def drop_misaligned_sectors(a, b, axes_a, axes_b, inplace=False):
     )
 
     if inplace:
-        a._blocks = new_blocks_a
-        a._indices = new_indices_a
-        b._blocks = new_blocks_b
-        b._indices = new_indices_b
+        a.modify(blocks=new_blocks_a, indices=new_indices_a)
+        b.modify(blocks=new_blocks_b, indices=new_indices_b)
     else:
         a = a.copy_with(blocks=new_blocks_a, indices=new_indices_a)
         b = b.copy_with(blocks=new_blocks_b, indices=new_indices_b)
