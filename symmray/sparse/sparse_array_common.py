@@ -2311,6 +2311,18 @@ def truncate_svd_result_blocksparse(
             VH.set_block(
                 (c1, c1), VH.get_block((c1, c1)) * s_sqrt.reshape((-1, 1))
             )
+        elif absorb == Absorb.Usq:
+            # 'lsqrt': absorb sqrt(s) into U only, drop VH
+            s_sqrt = ar.do("sqrt", s.get_block(c1), like=backend)
+            U.set_block(
+                (c0, c1), U.get_block((c0, c1)) * s_sqrt.reshape((1, -1))
+            )
+        elif absorb == Absorb.sqVH:
+            # 'rsqrt': absorb sqrt(s) into VH only, drop U
+            s_sqrt = ar.do("sqrt", s.get_block(c1), like=backend)
+            VH.set_block(
+                (c1, c1), VH.get_block((c1, c1)) * s_sqrt.reshape((-1, 1))
+            )
         else:
             raise ValueError(f"Unknown absorb value: {absorb}")
 
@@ -2321,6 +2333,11 @@ def truncate_svd_result_blocksparse(
         VH.check()
         VH.check_with(s, 0)
         U.check_with(VH, (1,), (0,))
+
+    if absorb == Absorb.Usq:
+        return U, None, None
+    if absorb == Absorb.sqVH:
+        return None, None, VH
 
     return U, None, VH
 
